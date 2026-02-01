@@ -1,6 +1,6 @@
 import os
 import time
-import sqlite3
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -12,8 +12,9 @@ from threading import Thread
 # =========================
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID"))
-YETKILI_ROLE_ID = int(os.getenv("YETKILI_ROLE_ID", 0))
+VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID"))
 PING_CHANNEL_ID = int(os.getenv("PING_CHANNEL_ID", 0))
+YETKILI_ROLE_ID = int(os.getenv("YETKILI_ROLE_ID", 0))
 
 start_time = time.time()
 
@@ -22,24 +23,10 @@ start_time = time.time()
 # =========================
 intents = discord.Intents.default()
 intents.members = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
-
-# =========================
-# DATABASE (SICIL)
-# =========================
-db = sqlite3.connect("sicil.db")
-cur = db.cursor()
-cur.execute("""
-CREATE TABLE IF NOT EXISTS sicil (
-    user_id INTEGER,
-    yetkili TEXT,
-    sebep TEXT,
-    tarih TEXT
-)
-""")
-db.commit()
 
 # =========================
 # UPTIME SERVER
@@ -60,10 +47,12 @@ def run_web():
 Thread(target=run_web).start()
 
 # =========================
-# YETKI KONTROL
+# YETKI CHECK
 # =========================
 def yetkili():
     async def predicate(interaction: discord.Interaction):
+        if YETKILI_ROLE_ID == 0:
+            return True
         role = interaction.guild.get_role(YETKILI_ROLE_ID)
         return role in interaction.user.roles
     return app_commands.check(predicate)
@@ -74,15 +63,53 @@ def yetkili():
 @bot.event
 async def on_ready():
     guild = discord.Object(id=GUILD_ID)
+
     await tree.sync(guild=guild)
 
     await bot.change_presence(
         status=discord.Status.idle,
-        activity=discord.Game("SASP Dashboard")
+        activity=discord.Game("San Andreas State Police")
     )
 
-    ping_loop.start()
-    print("✅ Bot hazır | Slash komutlar yüklendi")
+    await ensure_voice()
+
+    if PING_CHANNEL_ID != 0:
+        ping_loop.start()
+
+    print("✅ Bot hazır | Slashlar yüklendi | Ses aktif")
+
+# =========================
+# 24/7 SES
+# =========================
+async def ensure_voice():
+    await bot.wait_until_ready()
+
+    guild = bot.get_guild(GUILD_ID)
+    channel = guild.get_channel(VOICE_CHANNEL_ID)
+
+    if not channel:
+        print("❌ Ses kanalı bulunamadı")
+        return
+
+    if guild.voice_client:
+        return
+
+    try:
+        await channel.connect()
+        print("🔊 Bot sese bağlandı")
+    except Exception as e:
+        print(f"Ses hatası: {e}")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    vc = guild.voice_client
+
+    if not vc or not vc.channel:
+        await ensure_voice()
 
 # =========================
 # DASHBOARD
@@ -97,9 +124,6 @@ async def ping(interaction: discord.Interaction):
 
 @tasks.loop(minutes=5)
 async def ping_loop():
-    if PING_CHANNEL_ID == 0:
-        return
-
     channel = bot.get_channel(PING_CHANNEL_ID)
     if not channel:
         return
@@ -110,7 +134,7 @@ async def ping_loop():
         f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
     )
 
-    async for m in channel.history(limit=5):
+    async for m in channel.history(limit=3):
         if m.author == bot.user:
             await m.edit(content=msg)
             return
@@ -135,36 +159,10 @@ async def kick(interaction: discord.Interaction, user: discord.Member, sebep: st
 @tree.command(name="timeout", description="Timeout at", guild=discord.Object(id=GUILD_ID))
 @yetkili()
 async def timeout(interaction: discord.Interaction, user: discord.Member, dakika: int):
-    await user.timeout(discord.utils.utcnow() + discord.timedelta(minutes=dakika))
-    await interaction.response.send_message(f"⏳ {user} timeout aldı")
-
-# =========================
-# SICIL
-# =========================
-@tree.command(name="sicil-ekle", description="Sicil ekle", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def sicil_ekle(interaction: discord.Interaction, user: discord.Member, sebep: str):
-    cur.execute(
-        "INSERT INTO sicil VALUES (?,?,?,datetime('now'))",
-        (user.id, interaction.user.name, sebep)
+    await user.timeout(
+        discord.utils.utcnow() + discord.timedelta(minutes=dakika)
     )
-    db.commit()
-    await interaction.response.send_message("✅ Sicil eklendi")
-
-@tree.command(name="sicil-bak", description="Sicil bak", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def sicil_bak(interaction: discord.Interaction, user: discord.Member):
-    cur.execute("SELECT yetkili, sebep, tarih FROM sicil WHERE user_id=?", (user.id,))
-    rows = cur.fetchall()
-
-    if not rows:
-        return await interaction.response.send_message("📂 Sicil temiz")
-
-    text = ""
-    for r in rows:
-        text += f"👮 {r[0]} | {r[1]} | {r[2]}\n"
-
-    await interaction.response.send_message(text)
+    await interaction.response.send_message(f"⏳ {user} timeout aldı")
 
 # =========================
 # START
