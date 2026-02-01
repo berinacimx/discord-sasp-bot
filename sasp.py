@@ -1,201 +1,210 @@
+import os
+import time
+import json
+import asyncio
 import discord
-from discord.ext import commands
 from discord import app_commands
-import os, time, json
-from flask import Flask, request, abort
+from discord.ext import commands, tasks
+from flask import Flask, render_template_string
 from threading import Thread
 
 # =====================
-# AYARLAR
+# AYARLAR (ENV)
 # =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = 1234567890
-
-SASP_ROLE_ID = 1234567890
-AMIR_ROLE_ID = 1234567890
-
-LOG_CHANNEL_ID = 1234567890
-
-DASHBOARD_SECRET = "sasp-secret-key"
+GUILD_ID = int(os.getenv("GUILD_ID"))
+YETKILI_ROLE_ID = int(os.getenv("YETKILI_ROLE_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
+PORT = int(os.getenv("PORT", 8080))
 
 start_time = time.time()
+DATA_FILE = "sicil.json"
+
+# =====================
+# VERİ
+# =====================
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "w") as f:
+        json.dump({}, f)
+
+def load_data():
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 # =====================
 # BOT
 # =====================
-intents = discord.Intents.all()
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # =====================
-# SICIL
+# YETKİ KONTROL
 # =====================
-SICIL_FILE = "sicil.json"
-sicil = {}
-
-def load_sicil():
-    global sicil
-    try:
-        with open(SICIL_FILE, "r", encoding="utf-8") as f:
-            sicil = json.load(f)
-    except:
-        sicil = {}
-
-def save_sicil():
-    with open(SICIL_FILE, "w", encoding="utf-8") as f:
-        json.dump(sicil, f, ensure_ascii=False, indent=2)
-
-# =====================
-# DASHBOARD SERVER
-# =====================
-app = Flask("sasp")
-
-@app.route("/")
-def health():
-    uptime = int(time.time() - start_time)
-    return {"status":"ok","uptime":uptime}
-
-@app.route("/dashboard")
-def dashboard():
-    if request.args.get("key") != DASHBOARD_SECRET:
-        abort(403)
-
-    guild = bot.get_guild(GUILD_ID)
-    members = guild.members if guild else []
-
-    total_users = len(members)
-    online_users = len([m for m in members if m.status != discord.Status.offline])
-    sasp_users = len([m for m in members if any(r.id in [SASP_ROLE_ID, AMIR_ROLE_ID] for r in m.roles)])
-
-    sicil_count = sum(len(v) for v in sicil.values())
-
-    uptime = int(time.time() - start_time)
-
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<title>SASP Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body {{
-    background:#0b1622;
-    color:white;
-    font-family:Arial;
-}}
-.card {{
-    background:#111c2d;
-    padding:15px;
-    border-radius:10px;
-    margin:10px;
-}}
-.grid {{
-    display:grid;
-    grid-template-columns: repeat(3, 1fr);
-}}
-</style>
-</head>
-
-<body>
-<h1>🚔 SASP CONTROL PANEL</h1>
-
-<div class="grid">
-<div class="card">👥 Toplam Üye: {total_users}</div>
-<div class="card">🟢 Online: {online_users}</div>
-<div class="card">👮 SASP Yetkili: {sasp_users}</div>
-<div class="card">📁 Sicil Kayıt: {sicil_count}</div>
-<div class="card">⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk</div>
-<div class="card">🤖 Bot: Online</div>
-</div>
-
-<canvas id="chart1"></canvas>
-<canvas id="chart2"></canvas>
-
-<script>
-const ctx1 = document.getElementById('chart1');
-new Chart(ctx1, {{
-    type: 'bar',
-    data: {{
-        labels: ['Toplam Üye','Online','SASP Yetkili','Sicil'],
-        datasets: [{{
-            label: 'SASP İstatistik',
-            data: [{total_users},{online_users},{sasp_users},{sicil_count}],
-            backgroundColor: ['#1abc9c','#2ecc71','#3498db','#e67e22']
-        }}]
-    }}
-}});
-
-const ctx2 = document.getElementById('chart2');
-new Chart(ctx2, {{
-    type: 'doughnut',
-    data: {{
-        labels: ['Online','Offline'],
-        datasets: [{{
-            data: [{online_users},{total_users-online_users}],
-            backgroundColor:['#2ecc71','#e74c3c']
-        }}]
-    }}
-}});
-</script>
-
-</body>
-</html>
-"""
-    return html
-
-Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-
-# =====================
-# YETKİ
-# =====================
-def sasp_only():
+def yetkili():
     async def predicate(interaction: discord.Interaction):
-        ids = [r.id for r in interaction.user.roles]
-        return SASP_ROLE_ID in ids or AMIR_ROLE_ID in ids
+        if YETKILI_ROLE_ID == 0:
+            return True
+        role = interaction.guild.get_role(YETKILI_ROLE_ID)
+        return role in interaction.user.roles
     return app_commands.check(predicate)
+
+async def logla(guild, mesaj):
+    if LOG_CHANNEL_ID == 0:
+        return
+    ch = guild.get_channel(LOG_CHANNEL_ID)
+    if ch:
+        await ch.send(mesaj)
 
 # =====================
 # READY
 # =====================
 @bot.event
 async def on_ready():
-    load_sicil()
-    await bot.change_presence(status=discord.Status.idle,
-                              activity=discord.Activity(type=discord.ActivityType.watching,
-                                                        name="SASP Operations"))
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    print("🚔 SASP Bot Aktif + Dashboard Online")
+    await tree.sync()
+    await bot.change_presence(
+        status=discord.Status.idle,
+        activity=discord.Activity(type=discord.ActivityType.watching, name="SASP Departmanı")
+    )
+    print(f"🚔 SASP Bot Aktif: {bot.user}")
+    ping_loop.start()
 
 # =====================
-# LOG
+# MODERASYON
 # =====================
-async def log(msg):
-    ch = bot.get_channel(LOG_CHANNEL_ID)
-    if ch: await ch.send(msg)
-
-# =====================
-# SICIL
-# =====================
-@tree.command(name="sicil_ekle", description="Sicile kayıt ekle", guild=discord.Object(id=GUILD_ID))
-@sasp_only()
-async def sicil_ekle(interaction: discord.Interaction, uye: discord.Member, notu: str):
-    sicil.setdefault(str(uye.id), []).append({
-        "not": notu,
-        "ekleyen": interaction.user.id,
-        "tarih": int(time.time())
+@tree.command(name="ban", description="Kullanıcıyı banla")
+@yetkili()
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
+    await user.ban(reason=reason)
+    data = load_data()
+    data.setdefault(str(user.id), []).append({
+        "type": "BAN",
+        "reason": reason,
+        "yetkili": interaction.user.id,
+        "time": int(time.time())
     })
-    save_sicil()
-    await interaction.response.send_message("📁 Sicil eklendi")
-    await log(f"📁 Sicil: {uye} | {notu}")
+    save_data(data)
+    await interaction.response.send_message(f"🔨 {user} banlandı")
+    await logla(interaction.guild, f"🔨 **BAN** | {user} | {reason}")
 
-@tree.command(name="sicil_gor", description="Sicil görüntüle", guild=discord.Object(id=GUILD_ID))
-@sasp_only()
-async def sicil_gor(interaction: discord.Interaction, uye: discord.Member):
-    kayitlar = sicil.get(str(uye.id), [])
-    if not kayitlar:
-        return await interaction.response.send_message("Sicil temiz.")
-    text = "\n".join([f"- {k['not']}" for k in kayitlar])
-    await interaction.response.send_message(f"📁 **{uye} Sicil**\n{text}")
+@tree.command(name="kick", description="Kullanıcıyı at")
+@yetkili()
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
+    await user.kick(reason=reason)
+    await interaction.response.send_message(f"👢 {user} atıldı")
+    await logla(interaction.guild, f"👢 **KICK** | {user} | {reason}")
+
+@tree.command(name="timeout", description="Timeout ver")
+@yetkili()
+async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "Sebep yok"):
+    until = discord.utils.utcnow() + discord.timedelta(minutes=minutes)
+    await user.timeout(until, reason=reason)
+    await interaction.response.send_message(f"⏱ {user} timeout aldı ({minutes} dk)")
+    await logla(interaction.guild, f"⏱ **TIMEOUT** | {user} | {minutes} dk | {reason}")
+
+# =====================
+# SİCİL
+# =====================
+@tree.command(name="sicil", description="Kullanıcı sicili")
+@yetkili()
+async def sicil(interaction: discord.Interaction, user: discord.Member):
+    data = load_data()
+    kayıtlar = data.get(str(user.id), [])
+    if not kayıtlar:
+        return await interaction.response.send_message("📄 Sicil temiz ✅", ephemeral=True)
+
+    msg = ""
+    for i, k in enumerate(kayıtlar, 1):
+        msg += f"{i}. {k['type']} | {k['reason']}\n"
+
+    await interaction.response.send_message(f"📄 **{user} Sicili**\n{msg}", ephemeral=True)
+
+# =====================
+# TEMİZLİK
+# =====================
+@tree.command(name="clear", description="Mesaj sil")
+@yetkili()
+async def clear(interaction: discord.Interaction, amount: int):
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"🧹 {amount} mesaj silindi", ephemeral=True)
+
+# =====================
+# ANTİ-SPAM (BASİT)
+# =====================
+spam_cache = {}
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    now = time.time()
+    spam_cache.setdefault(message.author.id, [])
+    spam_cache[message.author.id].append(now)
+    spam_cache[message.author.id] = [t for t in spam_cache[message.author.id] if now - t < 5]
+
+    if len(spam_cache[message.author.id]) > 5:
+        try:
+            await message.delete()
+            await message.author.timeout(discord.utils.utcnow() + discord.timedelta(minutes=1))
+        except:
+            pass
+
+    await bot.process_commands(message)
+
+# =====================
+# PING & UPTIME
+# =====================
+@tree.command(name="ping", description="Bot durumu")
+async def ping(interaction: discord.Interaction):
+    uptime = int(time.time() - start_time)
+    await interaction.response.send_message(
+        f"📡 Ping: {round(bot.latency*1000)}ms\n"
+        f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk"
+    )
+
+@tasks.loop(minutes=5)
+async def ping_loop():
+    pass
+
+# =====================
+# DASHBOARD
+# =====================
+app = Flask("sasp")
+
+HTML = """
+<html>
+<head>
+<title>SASP Dashboard</title>
+<style>
+body{background:#0f172a;color:white;font-family:Arial;text-align:center}
+.card{background:#1e293b;padding:20px;margin:20px;border-radius:10px}
+</style>
+</head>
+<body>
+<h1>🚓 SASP Dashboard</h1>
+<div class="card">Bot Durumu: 🟢 Online</div>
+<div class="card">Uptime: {{uptime}}</div>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    uptime = int(time.time() - start_time)
+    return render_template_string(HTML, uptime=f"{uptime//3600}sa {(uptime%3600)//60}dk")
+
+def run_web():
+    app.run(host="0.0.0.0", port=PORT)
+
+Thread(target=run_web).start()
 
 # =====================
 bot.run(TOKEN)
