@@ -1,135 +1,165 @@
 import discord
+from discord.ext import commands, tasks
 from discord import app_commands
-import os, json, asyncio
 from flask import Flask
 from threading import Thread
-from datetime import timedelta
+import time
+import os
 
-# ---------- ENV ----------
-TOKEN = os.getenv("TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))
-VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID"))
-YETKILI_ROLE_ID = int(os.getenv("YETKILI_ROLE_ID"))
+# =====================
+# AYARLAR
+# =====================
+TOKEN = os.getenv("TOKEN")  # Railway ENV
+GUILD_ID = 123456789012345678
+VOICE_CHANNEL_ID = 123456789012345678
+LOG_CHANNEL_ID = 123456789012345678
+YETKILI_ROLE_ID = 123456789012345678
 
-# ---------- DISCORD ----------
+start_time = time.time()
+
+# =====================
+# BOT
+# =====================
 intents = discord.Intents.default()
 intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
 
-bot = discord.Client(intents=intents)
-tree = app_commands.CommandTree(bot)
-
-# ---------- SICIL ----------
-SICIL_FILE = "sicil.json"
-if not os.path.exists(SICIL_FILE):
-    with open(SICIL_FILE, "w") as f:
-        json.dump({}, f)
-
-def load_sicil():
-    with open(SICIL_FILE, "r") as f:
-        return json.load(f)
-
-def save_sicil(data):
-    with open(SICIL_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def yetkili_mi(member):
-    return any(role.id == YETKILI_ROLE_ID for role in member.roles)
-
-# ---------- FLASK ----------
+# =====================
+# UPTIME SERVER
+# =====================
 app = Flask("uptime")
 
 @app.route("/")
 def home():
-    return "Bot Aktif"
+    uptime = int(time.time() - start_time)
+    return {
+        "status": "ok",
+        "uptime": f"{uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
+    }
 
 def run_web():
     app.run(host="0.0.0.0", port=8080)
 
-# ---------- SLASH KOMUTLAR ----------
+Thread(target=run_web).start()
 
-@tree.command(name="ping", description="Bot durumu", guild=discord.Object(id=GUILD_ID))
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("🏓 Pong", ephemeral=True)
-
-# ---- SICIL ----
-@tree.command(name="sicil_ekle", description="Sicile kayıt ekle", guild=discord.Object(id=GUILD_ID))
-async def sicil_ekle(interaction: discord.Interaction, uye: discord.Member, sebep: str):
-    if not yetkili_mi(interaction.user):
-        return await interaction.response.send_message("❌ Yetkin yok", ephemeral=True)
-
-    data = load_sicil()
-    uid = str(uye.id)
-
-    data.setdefault(uid, []).append({
-        "yetkili": interaction.user.name,
-        "sebep": sebep
-    })
-
-    save_sicil(data)
-    await interaction.response.send_message(f"📋 {uye.mention} siciline eklendi", ephemeral=True)
-
-@tree.command(name="sicil_gor", description="Sicil görüntüle", guild=discord.Object(id=GUILD_ID))
-async def sicil_gor(interaction: discord.Interaction, uye: discord.Member):
-    data = load_sicil()
-    kayıtlar = data.get(str(uye.id), [])
-
-    if not kayıtlar:
-        return await interaction.response.send_message("📄 Sicil temiz", ephemeral=True)
-
-    text = "\n".join([f"• {k['sebep']} (Yetkili: {k['yetkili']})" for k in kayıtlar])
-    await interaction.response.send_message(f"📋 **Sicil:**\n{text}", ephemeral=True)
-
-# ---- MODERATION ----
-@tree.command(name="ban", description="Üye banla", guild=discord.Object(id=GUILD_ID))
-async def ban(interaction: discord.Interaction, uye: discord.Member, sebep: str):
-    if not yetkili_mi(interaction.user):
-        return await interaction.response.send_message("❌ Yetkin yok", ephemeral=True)
-
-    await uye.ban(reason=sebep)
-    await interaction.response.send_message(f"🔨 {uye} banlandı", ephemeral=True)
-
-@tree.command(name="kick", description="Üye at", guild=discord.Object(id=GUILD_ID))
-async def kick(interaction: discord.Interaction, uye: discord.Member, sebep: str):
-    if not yetkili_mi(interaction.user):
-        return await interaction.response.send_message("❌ Yetkin yok", ephemeral=True)
-
-    await uye.kick(reason=sebep)
-    await interaction.response.send_message(f"👢 {uye} atıldı", ephemeral=True)
-
-@tree.command(name="timeout", description="Timeout ver", guild=discord.Object(id=GUILD_ID))
-async def timeout(interaction: discord.Interaction, uye: discord.Member, dakika: int):
-    if not yetkili_mi(interaction.user):
-        return await interaction.response.send_message("❌ Yetkin yok", ephemeral=True)
-
-    await uye.timeout(timedelta(minutes=dakika))
-    await interaction.response.send_message(f"⏳ {uye} timeout aldı", ephemeral=True)
-
-@tree.command(name="untimeout", description="Timeout kaldır", guild=discord.Object(id=GUILD_ID))
-async def untimeout(interaction: discord.Interaction, uye: discord.Member):
-    if not yetkili_mi(interaction.user):
-        return await interaction.response.send_message("❌ Yetkin yok", ephemeral=True)
-
-    await uye.timeout(None)
-    await interaction.response.send_message("✅ Timeout kaldırıldı", ephemeral=True)
-
-# ---------- READY ----------
+# =====================
+# READY
+# =====================
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} aktif")
+    print(f"{bot.user} aktif")
+    await bot.change_presence(
+        status=discord.Status.idle,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="SASP Department"
+        )
+    )
 
+    guild = discord.Object(id=GUILD_ID)
+    await tree.sync(guild=guild)
+
+    await join_voice_247()
+    ping_loop.start()
+
+# =====================
+# 24/7 SES
+# =====================
+async def join_voice_247():
     guild = bot.get_guild(GUILD_ID)
     channel = guild.get_channel(VOICE_CHANNEL_ID)
 
-    if channel:
-        try:
-            await channel.connect(reconnect=True)
-            print("🔊 24/7 ses aktif")
-        except:
-            pass
+    if not guild.voice_client:
+        await channel.connect(self_deaf=True)  
+        # self_deaf = bot kulaklığı kapalı (dinlemez)
 
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    print("✅ Slash komutlar yüklendi")
+# =====================
+# YETKİ KONTROL
+# =====================
+def yetkili():
+    async def predicate(interaction: discord.Interaction):
+        role = interaction.guild.get_role(YETKILI_ROLE_ID)
+        return role in interaction.user.roles
+    return app_commands.check(predicate)
 
-# ---------- START ----------
-Thread(target=run_web).start()
+# =====================
+# SLASH: PING
+# =====================
+@tree.command(name="ping", description="Bot durumu", guild=discord.Object(id=GUILD_ID))
+async def ping(interaction: discord.Interaction):
+    uptime = int(time.time() - start_time)
+    await interaction.response.send_message(
+        f"📡 Ping: {round(bot.latency*1000)}ms\n"
+        f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
+    )
+
+# =====================
+# SLASH: BAN
+# =====================
+@tree.command(name="ban", description="Kullanıcıyı banlar", guild=discord.Object(id=GUILD_ID))
+@yetkili()
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
+    await user.ban(reason=reason)
+    await interaction.response.send_message(f"🔨 {user} banlandı")
+
+# =====================
+# SLASH: KICK
+# =====================
+@tree.command(name="kick", description="Kullanıcıyı atar", guild=discord.Object(id=GUILD_ID))
+@yetkili()
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
+    await user.kick(reason=reason)
+    await interaction.response.send_message(f"👢 {user} atıldı")
+
+# =====================
+# SLASH: TIMEOUT
+# =====================
+@tree.command(name="timeout", description="Susturma verir", guild=discord.Object(id=GUILD_ID))
+@yetkili()
+async def timeout(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    dakika: int,
+    reason: str = "Sebep yok"
+):
+    until = discord.utils.utcnow() + discord.timedelta(minutes=dakika)
+    await user.timeout(until, reason=reason)
+    await interaction.response.send_message(
+        f"⏳ {user} {dakika} dk susturuldu"
+    )
+
+# =====================
+# SLASH: CLEAR
+# =====================
+@tree.command(name="clear", description="Mesaj siler", guild=discord.Object(id=GUILD_ID))
+@yetkili()
+async def clear(interaction: discord.Interaction, amount: int):
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(
+        f"🧹 {amount} mesaj silindi",
+        ephemeral=True
+    )
+
+# =====================
+# 5 DK PING LOOP
+# =====================
+@tasks.loop(minutes=5)
+async def ping_loop():
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    uptime = int(time.time() - start_time)
+
+    msg = (
+        f"📡 Ping: {round(bot.latency*1000)}ms\n"
+        f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
+    )
+
+    async for m in channel.history(limit=3):
+        if m.author == bot.user:
+            await m.edit(content=msg)
+            return
+
+    await channel.send(msg)
+
+# =====================
 bot.run(TOKEN)
