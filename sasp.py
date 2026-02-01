@@ -1,25 +1,13 @@
 import discord
-from discord.ext import commands, tasks
 from discord import app_commands
-from flask import Flask
-from threading import Thread
-import time
-import datetime
+from discord.ext import commands
+import os
+import json
+import asyncio
 
-# =====================
-# AYARLAR
-# =====================
-TOKEN = "BOT_TOKEN"
-GUILD_ID = 123456789012345678
-LOG_CHANNEL_ID = 123456789012345678
-PING_CHANNEL_ID = 123456789012345678
-YETKILI_ROLE_ID = 123456789012345678
+TOKEN = os.getenv("TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
-start_time = time.time()
-
-# =====================
-# BOT
-# =====================
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -27,167 +15,100 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# =====================
-# UPTIME SERVER
-# =====================
-app = Flask("uptime")
+DATA_FILE = "records.json"
 
-@app.route("/")
-def home():
-    uptime = int(time.time() - start_time)
-    return {
-        "status": "ok",
-        "uptime": f"{uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
-    }
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w") as f:
+            json.dump({}, f)
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
-def run_web():
-    app.run(host="0.0.0.0", port=8080)
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-Thread(target=run_web).start()
-
-# =====================
-# YETKİ KONTROL
-# =====================
-def yetkili():
-    async def predicate(interaction: discord.Interaction):
-        role = interaction.guild.get_role(YETKILI_ROLE_ID)
-        return role in interaction.user.roles
-    return app_commands.check(predicate)
-
-# =====================
-# READY
-# =====================
 @bot.event
 async def on_ready():
-    await bot.change_presence(
-        status=discord.Status.idle,
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="SASP Departmanı"
-        )
-    )
+    try:
+        if GUILD_ID != 0:
+            await tree.sync(guild=discord.Object(id=GUILD_ID))
+        else:
+            await tree.sync()
+        print(f"✅ Bot aktif: {bot.user}")
+    except Exception as e:
+        print("❌ Slash sync hatası:", e)
 
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    print(f"{bot.user} aktif!")
-    ping_loop.start()
+# -------------------- YETKİ KONTROL --------------------
+def admin_only(interaction: discord.Interaction):
+    return interaction.user.guild_permissions.administrator
 
-# =====================
-# LOG
-# =====================
-async def log(guild, text):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
-    if channel:
-        await channel.send(text)
+# -------------------- SLASH KOMUTLAR --------------------
 
-# =====================
-# SLASH /PING
-# =====================
-@tree.command(name="ping", description="Bot durumu", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="ping", description="Bot gecikmesini gösterir")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    uptime = int(time.time() - start_time)
-    await interaction.followup.send(
-        f"📡 Ping: {round(bot.latency*1000)}ms\n"
-        f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn",
-        ephemeral=True
+    await interaction.response.send_message(
+        f"🏓 Pong! `{round(bot.latency * 1000)}ms`", ephemeral=True
     )
 
-# =====================
-# SLASH /CLEAR
-# =====================
-@tree.command(name="clear", description="Mesaj sil", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def clear(interaction: discord.Interaction, amount: int):
+@tree.command(name="ban", description="Kullanıcıyı banlar")
+@app_commands.check(admin_only)
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep belirtilmedi"):
     await interaction.response.defer(ephemeral=True)
-
-    deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(
-        f"🧹 {len(deleted)} mesaj silindi",
-        ephemeral=True
-    )
-
-    await log(interaction.guild, f"🧹 {interaction.user} {len(deleted)} mesaj sildi")
-
-# =====================
-# SLASH /BAN
-# =====================
-@tree.command(name="ban", description="Kullanıcıyı banla", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
-    await interaction.response.defer(ephemeral=True)
-
     await user.ban(reason=reason)
-    await interaction.followup.send(f"🔨 {user} banlandı", ephemeral=True)
 
-    await log(interaction.guild, f"🔨 {user} banlandı | {interaction.user}")
+    data = load_data()
+    uid = str(user.id)
+    data.setdefault(uid, []).append(f"BAN: {reason}")
+    save_data(data)
 
-# =====================
-# SLASH /KICK
-# =====================
-@tree.command(name="kick", description="Kullanıcıyı at", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep yok"):
+    await interaction.followup.send(f"🚫 {user} banlandı.")
+
+@tree.command(name="kick", description="Kullanıcıyı atar")
+@app_commands.check(admin_only)
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Sebep belirtilmedi"):
     await interaction.response.defer(ephemeral=True)
-
     await user.kick(reason=reason)
-    await interaction.followup.send(f"👢 {user} atıldı", ephemeral=True)
+    await interaction.followup.send(f"👢 {user} atıldı.")
 
-    await log(interaction.guild, f"👢 {user} kicklendi | {interaction.user}")
-
-# =====================
-# SLASH /TIMEOUT
-# =====================
-@tree.command(name="timeout", description="Timeout at", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "Sebep yok"):
+@tree.command(name="timeout", description="Kullanıcıya timeout atar")
+@app_commands.check(admin_only)
+async def timeout(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    minutes: int,
+    reason: str = "Sebep belirtilmedi"
+):
     await interaction.response.defer(ephemeral=True)
+    duration = discord.utils.utcnow() + discord.timedelta(minutes=minutes)
+    await user.edit(timed_out_until=duration, reason=reason)
+    await interaction.followup.send(f"⏳ {user} {minutes} dk timeout aldı.")
 
-    until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
-    await user.timeout(until, reason=reason)
+@tree.command(name="sicil", description="Kullanıcının sicilini gösterir")
+async def sicil(interaction: discord.Interaction, user: discord.Member):
+    data = load_data()
+    records = data.get(str(user.id), [])
 
-    await interaction.followup.send(
-        f"⏳ {user} {minutes} dk timeoutlandı",
+    if not records:
+        msg = "🟢 Sicil temiz."
+    else:
+        msg = "\n".join(records)
+
+    await interaction.response.send_message(
+        f"📄 **{user} Sicil**\n```{msg}```",
         ephemeral=True
     )
 
-    await log(interaction.guild, f"⏳ {user} timeout | {minutes}dk | {interaction.user}")
+# -------------------- ERROR HANDLER --------------------
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message(
+            "❌ Bu komutu kullanma yetkin yok.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"⚠️ Hata: {error}", ephemeral=True
+        )
 
-# =====================
-# SLASH /UNBAN
-# =====================
-@tree.command(name="unban", description="Ban kaldır", guild=discord.Object(id=GUILD_ID))
-@yetkili()
-async def unban(interaction: discord.Interaction, user_id: int):
-    await interaction.response.defer(ephemeral=True)
-
-    user = await bot.fetch_user(user_id)
-    await interaction.guild.unban(user)
-
-    await interaction.followup.send(f"✅ {user} unbanlandı", ephemeral=True)
-    await log(interaction.guild, f"✅ {user} unbanlandı | {interaction.user}")
-
-# =====================
-# PING LOOP (5 DK)
-# =====================
-@tasks.loop(minutes=5)
-async def ping_loop():
-    channel = bot.get_channel(PING_CHANNEL_ID)
-    if not channel:
-        return
-
-    uptime = int(time.time() - start_time)
-    msg = (
-        f"📡 Ping: {round(bot.latency*1000)}ms\n"
-        f"⏱ Uptime: {uptime//3600}sa {(uptime%3600)//60}dk {uptime%60}sn"
-    )
-
-    async for m in channel.history(limit=5):
-        if m.author == bot.user:
-            await m.edit(content=msg)
-            return
-
-    await channel.send(msg)
-
-# =====================
 bot.run(TOKEN)
